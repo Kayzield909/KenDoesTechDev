@@ -15,6 +15,7 @@ import PresetChips from '../components/PresetChips';
 import VolumeBar from '../components/VolumeBar';
 import SettingsSheet from '../components/SettingsSheet';
 import { useTimerEngine, SC } from '../hooks/useTimerEngine';
+import { useAudioController } from '../hooks/useAudioController';
 
 const KEEP_AWAKE_TAG = 'movement-timer';
 const MAX_DIM = 0.92; // wind-down darkens the screen toward black
@@ -64,6 +65,40 @@ export default function HomeScreen() {
     },
   });
   const { status, statusCode, elapsedMs, totalMs, windDownMs, displayMinutes, toggle, reset } = engine;
+
+  const audio = useAudioController();
+
+  // Wire wind-down → real media volume.
+  //  windingDown: capture original volume + ramp to zero over the remaining window
+  //  done:        pause other media (focus), then restore the captured volume
+  //  paused:      restore (keep the captured value so resume can re-fade)
+  //  idle/reset:  restore + clear
+  useEffect(() => {
+    switch (status) {
+      case 'windingDown':
+        audio.fadeOut(Math.max(0, totalMs.value - elapsedMs.value));
+        break;
+      case 'done':
+        audio.finish();
+        break;
+      case 'paused':
+        audio.restore(false);
+        break;
+      case 'idle':
+        audio.restore(true);
+        break;
+      // running: pre-wind-down, volume untouched
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
+  // Safety: never leave the device muted if the screen unmounts mid-fade.
+  useEffect(() => {
+    return () => {
+      audio.restore(true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Keep-awake: hold while the timer actually runs, release otherwise.
   useEffect(() => {
@@ -146,10 +181,9 @@ export default function HomeScreen() {
             <PresetChips value={minutes} onSelect={setMinutes} />
           ) : (
             <VolumeBar
+              volumeFraction={audio.volumeFraction}
               statusCode={statusCode}
-              elapsedMs={elapsedMs}
-              totalMs={totalMs}
-              windDownMs={windDownMs}
+              native={audio.native}
             />
           )}
 
