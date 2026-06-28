@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Required to change the media (STREAM_MUSIC) volume. Merged into the app manifest. -->
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+</manifest>
