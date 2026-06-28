@@ -1,97 +1,100 @@
 import React, { useRef } from 'react';
-import { View, Text, PanResponder, GestureResponderEvent } from 'react-native';
+import { View, Text, Pressable, PanResponder, StyleSheet, GestureResponderEvent } from 'react-native';
 import Svg, { Circle, G, Line, Path, Defs, RadialGradient, Stop } from 'react-native-svg';
+import Animated, { useAnimatedProps, type SharedValue } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import theme from '../theme';
+import type { TimerStatus } from '../hooks/useTimerEngine';
+import BalanceWheel from './BalanceWheel';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+const AnimatedG = Animated.createAnimatedComponent(G);
 
 /**
- * Dial — the watch face.
+ * Dial — the watch face and the primary control surface.
  *
- * Static layers drawn in react-native-svg:
- *  - an outer brass bezel ring,
- *  - 90 minute ticks (every 5th longer + heavier),
- *  - a lume "mainspring" arc showing the set duration out of maxMinutes,
- *  - a draggable bezel pip at the arc's leading edge,
- *  - the hero minutes number in the display type (no seconds, ever).
+ *  - Idle: drag the bezel to set minutes (per-minute detent haptics); a lume pip
+ *    marks the set value; tap the center to start.
+ *  - Running / windingDown: a sweeping hand crosses the dial over the full
+ *    duration, the lume mainspring arc unwinds as time drains, and the balance
+ *    wheel beats beneath the number. Tap center to pause, long-press to reset.
  *
- * Interaction (A2): when `interactive`, dragging a finger around the bezel
- * rotates it. We accumulate *relative* angle change so crossing 12 o'clock
- * never wraps 90→1, snap to whole minutes, and fire a light haptic on each
- * minute change to mimic a mechanical crown detent.
+ * All motion is driven off the engine's shared elapsed/total values, on the UI
+ * thread, so it stays smooth at 60fps with no per-second jank.
  */
 
 type DialProps = {
-  /** Set duration in minutes (controlled). */
+  /** Set duration in minutes (idle pip + drag target). */
   minutes: number;
-  /** Called with the new whole-minute value while dragging. */
-  onChange?: (minutes: number) => void;
-  /** Enable bezel-drag. */
-  interactive?: boolean;
-  /** Full-scale of the dial. */
+  /** Number to display (remaining minutes while running). */
+  numberValue: number;
+  onChangeMinutes?: (minutes: number) => void;
+  onCenterPress?: () => void;
+  onCenterLongPress?: () => void;
+  status: TimerStatus;
+  elapsedMs: SharedValue<number>;
+  totalMs: SharedValue<number>;
   maxMinutes?: number;
-  /** Rendered width/height in px. */
   size?: number;
 };
 
-const VB = 300; // SVG viewBox is square; all geometry is in viewBox units
-const C = VB / 2; // center
+const VB = 300; // square viewBox; all geometry is in viewBox units
+const C = VB / 2;
 const MIN_MINUTES = 1;
+
+// Radii
+const BEZEL_R = 142;
+const TICK_OUTER_R = 134;
+const ARC_R = 116; // lume mainspring band, inside the ticks
+const HAND_TIP_R = 124;
+const HAND_TAIL_R = 22;
+const BALANCE_CY = C + 62;
+const BALANCE_R = 18;
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-/**
- * Polar → cartesian with 0° at 12 o'clock, increasing clockwise.
- * (SVG y grows downward, so cos drives -y and sin drives +x.)
- */
+/** Polar → cartesian, 0° at 12 o'clock, clockwise. (Worklet-safe.) */
 function pointOnDial(radius: number, angleDeg: number) {
+  'worklet';
   const rad = (angleDeg * Math.PI) / 180;
-  return {
-    x: C + radius * Math.sin(rad),
-    y: C - radius * Math.cos(rad),
-  };
+  return { x: C + radius * Math.sin(rad), y: C - radius * Math.cos(rad) };
 }
 
-/** Build an SVG arc path along a circle of `radius`, from `startDeg` to `endDeg` clockwise. */
+/** SVG arc path along `radius`, startDeg → endDeg clockwise. (Worklet-safe.) */
 function arcPath(radius: number, startDeg: number, endDeg: number) {
+  'worklet';
   const start = pointOnDial(radius, startDeg);
   const end = pointOnDial(radius, endDeg);
   const largeArc = endDeg - startDeg > 180 ? 1 : 0;
-  // sweep-flag 1 = clockwise in SVG's y-down coordinate space
   return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y}`;
 }
 
 export default function Dial({
   minutes,
-  onChange,
-  interactive = false,
+  numberValue,
+  onChangeMinutes,
+  onCenterPress,
+  onCenterLongPress,
+  status,
+  elapsedMs,
+  totalMs,
   maxMinutes = theme.dial.maxMinutes,
   size = 320,
 }: DialProps) {
-  const ticks = theme.dial.ticks; // 90, one per minute
-  const fraction = clamp(minutes / maxMinutes, 0, 1);
-  const sweep = fraction * 360;
+  const ticks = theme.dial.ticks;
+  const idle = status === 'idle';
+  const numberSize = size * 0.38;
 
-  // Radii in viewBox units
-  const bezelR = 142;
-  const tickOuterR = 134;
-  const tickLenShort = 7;
-  const tickLenLong = 15;
-  const arcR = 116; // lume mainspring band sits inside the ticks
-
-  const numberSize = size * 0.4; // hero figure scales with the dial
-
-  // --- Bezel-drag state (refs so PanResponder handlers never go stale) ---
+  // --- Bezel-drag (idle only). Refs keep PanResponder handlers fresh. ---
   const minutesRef = useRef(minutes);
   minutesRef.current = minutes;
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+  const onChangeRef = useRef(onChangeMinutes);
+  onChangeRef.current = onChangeMinutes;
 
-  const accRef = useRef(minutes); // continuous (float) minutes during a drag
-  const lastAngleRef = useRef(0); // last touch angle, for relative deltas
+  const accRef = useRef(minutes);
+  const lastAngleRef = useRef(0);
   const lastRoundedRef = useRef(minutes);
 
-  // Touch angle: 0° at 12 o'clock, clockwise. locationX/Y are relative to the
-  // gesture view (size × size), so center is (size/2, size/2).
   const angleFromTouch = (e: GestureResponderEvent) => {
     const dx = e.nativeEvent.locationX - size / 2;
     const dy = e.nativeEvent.locationY - size / 2;
@@ -102,17 +105,17 @@ export default function Dial({
 
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      // Claim only on move so center taps/long-presses fall through to the button.
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: () => minutesRef.current >= 0 && idleRef.current,
       onPanResponderGrant: (e) => {
-        accRef.current = minutesRef.current; // anchor to the current value
+        accRef.current = minutesRef.current;
         lastRoundedRef.current = minutesRef.current;
         lastAngleRef.current = angleFromTouch(e);
       },
       onPanResponderMove: (e) => {
         const a = angleFromTouch(e);
         let diff = a - lastAngleRef.current;
-        // shortest signed delta so a drag never "jumps" across the seam
         if (diff > 180) diff -= 360;
         else if (diff < -180) diff += 360;
         lastAngleRef.current = a;
@@ -122,28 +125,46 @@ export default function Dial({
           MIN_MINUTES,
           maxMinutes,
         );
-
         const rounded = Math.round(accRef.current);
         if (rounded !== lastRoundedRef.current) {
           lastRoundedRef.current = rounded;
-          // mechanical crown detent per minute
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); // crown detent
           onChangeRef.current?.(rounded);
         }
       },
     }),
   ).current;
+  // Keep an `idle` snapshot for the responder predicate without rebuilding it.
+  const idleRef = useRef(idle);
+  idleRef.current = idle;
 
-  const pip = pointOnDial(arcR, sweep);
+  // --- Animated mainspring arc: unwinds as remaining time drains. ---
+  const arcAnimatedProps = useAnimatedProps(() => {
+    const maxMs = maxMinutes * 60000;
+    const remaining = totalMs.value - elapsedMs.value;
+    const f = Math.max(0, Math.min(1, remaining / maxMs));
+    const sweep = f * 360;
+    if (sweep <= 0.001) return { d: '' };
+    return { d: arcPath(ARC_R, 0, Math.min(sweep, 359.999)) };
+  });
+
+  // --- Sweeping hand: elapsed fraction → rotation. ---
+  const handAnimatedProps = useAnimatedProps(() => {
+    const frac = totalMs.value > 0 ? elapsedMs.value / totalMs.value : 0;
+    return { rotation: frac * 360 };
+  });
+
+  // Idle pip at the set-value arc end.
+  const pipAngle = (clamp(minutes, 0, maxMinutes) / maxMinutes) * 360;
+  const pip = pointOnDial(ARC_R, pipAngle);
 
   return (
     <View
       style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}
-      {...(interactive ? panResponder.panHandlers : {})}
+      {...panResponder.panHandlers}
     >
       <Svg width={size} height={size} viewBox={`0 0 ${VB} ${VB}`}>
         <Defs>
-          {/* Subtle warm vignette so the face reads as a recessed plate */}
           <RadialGradient id="face" cx="50%" cy="44%" r="60%">
             <Stop offset="0%" stopColor={theme.colors.bg[3]} />
             <Stop offset="70%" stopColor={theme.colors.bg[2]} />
@@ -151,21 +172,19 @@ export default function Dial({
           </RadialGradient>
         </Defs>
 
-        {/* Recessed dial face */}
-        <Circle cx={C} cy={C} r={bezelR - 2} fill="url(#face)" />
-
-        {/* Outer + inner bezel rings (brass) */}
-        <Circle cx={C} cy={C} r={bezelR} stroke={theme.colors.brass.base} strokeWidth={2} fill="none" />
-        <Circle cx={C} cy={C} r={bezelR - 8} stroke={theme.colors.brass.dim} strokeWidth={1} fill="none" />
+        {/* Recessed face + bezel rings */}
+        <Circle cx={C} cy={C} r={BEZEL_R - 2} fill="url(#face)" />
+        <Circle cx={C} cy={C} r={BEZEL_R} stroke={theme.colors.brass.base} strokeWidth={2} fill="none" />
+        <Circle cx={C} cy={C} r={BEZEL_R - 8} stroke={theme.colors.brass.dim} strokeWidth={1} fill="none" />
 
         {/* Minute ticks */}
         <G>
           {Array.from({ length: ticks }, (_, i) => {
             const angle = (i / ticks) * 360;
             const isMajor = i % 5 === 0;
-            const len = isMajor ? tickLenLong : tickLenShort;
-            const outer = pointOnDial(tickOuterR, angle);
-            const inner = pointOnDial(tickOuterR - len, angle);
+            const len = isMajor ? 15 : 7;
+            const outer = pointOnDial(TICK_OUTER_R, angle);
+            const inner = pointOnDial(TICK_OUTER_R - len, angle);
             return (
               <Line
                 key={i}
@@ -181,27 +200,58 @@ export default function Dial({
           })}
         </G>
 
-        {/* Mainspring track (full, dim) + lit arc for the set duration */}
-        <Circle cx={C} cy={C} r={arcR} stroke={theme.colors.bg.line} strokeWidth={5} fill="none" />
-        {sweep > 0 && (
-          <Path
-            d={arcPath(arcR, 0, Math.min(sweep, 359.999))}
-            stroke={theme.colors.lume.glow}
-            strokeWidth={5}
-            strokeLinecap="round"
-            fill="none"
-          />
+        {/* Mainspring track + unwinding lume arc */}
+        <Circle cx={C} cy={C} r={ARC_R} stroke={theme.colors.bg.line} strokeWidth={5} fill="none" />
+        <AnimatedPath
+          animatedProps={arcAnimatedProps}
+          stroke={theme.colors.lume.glow}
+          strokeWidth={5}
+          strokeLinecap="round"
+          fill="none"
+        />
+
+        {/* Sweeping hand (running states only) */}
+        {!idle && (
+          <AnimatedG origin={`${C}, ${C}`} animatedProps={handAnimatedProps}>
+            <Line
+              x1={C}
+              y1={C + HAND_TAIL_R}
+              x2={C}
+              y2={C - HAND_TIP_R}
+              stroke={theme.colors.brass.hi}
+              strokeWidth={2.5}
+              strokeLinecap="round"
+            />
+            <Circle cx={C} cy={C - HAND_TIP_R} r={4} fill={theme.colors.lume.glow} />
+          </AnimatedG>
         )}
 
-        {/* Draggable bezel pip at the arc's leading edge */}
-        <Circle cx={pip.x} cy={pip.y} r={9} fill={theme.colors.lume.rest} opacity={0.25} />
-        <Circle cx={pip.x} cy={pip.y} r={5} fill={theme.colors.lume.glow} />
+        {/* Center cap */}
+        <Circle cx={C} cy={C} r={5} fill={theme.colors.brass.hi} />
+
+        {/* Idle grab pip */}
+        {idle && (
+          <>
+            <Circle cx={pip.x} cy={pip.y} r={9} fill={theme.colors.lume.rest} opacity={0.25} />
+            <Circle cx={pip.x} cy={pip.y} r={5} fill={theme.colors.lume.glow} />
+          </>
+        )}
+
+        {/* Balance wheel beneath the number (running states only) */}
+        {!idle && <BalanceWheel cx={C} cy={BALANCE_CY} r={BALANCE_R} status={status} />}
       </Svg>
 
-      {/* Hero minutes number — overlaid RN text in the display type, no seconds */}
+      {/* Hero minutes number — overlaid RN text, nudged up to clear the balance. */}
       <View
         pointerEvents="none"
-        style={{ position: 'absolute', alignItems: 'center', justifyContent: 'center' }}
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            alignItems: 'center',
+            justifyContent: 'center',
+            transform: [{ translateY: -size * 0.06 }],
+          },
+        ]}
       >
         <Text
           style={{
@@ -211,11 +261,10 @@ export default function Dial({
             fontWeight: theme.fontWeight.bold,
             lineHeight: numberSize * 1.02,
             letterSpacing: -2,
-            // tabular figures so digits don't jump as the value changes
             fontVariant: ['tabular-nums'],
           }}
         >
-          {minutes}
+          {numberValue}
         </Text>
         <Text
           style={{
@@ -223,12 +272,30 @@ export default function Dial({
             fontFamily: theme.fonts.mono,
             fontSize: theme.fontSize.caption,
             letterSpacing: 6,
-            marginTop: -size * 0.02,
+            marginTop: -size * 0.01,
           }}
         >
           MIN
         </Text>
       </View>
+
+      {/* Center control: tap = start/pause/resume, long-press = reset. */}
+      <Pressable
+        onPress={onCenterPress}
+        onLongPress={onCenterLongPress}
+        delayLongPress={450}
+        accessibilityRole="button"
+        accessibilityLabel="Start, pause, or reset the timer"
+        style={{
+          position: 'absolute',
+          top: size * 0.25,
+          left: size * 0.25,
+          width: size * 0.5,
+          height: size * 0.5,
+          borderRadius: size * 0.25,
+          // transparent — the number/balance are the visible affordance
+        }}
+      />
     </View>
   );
 }
