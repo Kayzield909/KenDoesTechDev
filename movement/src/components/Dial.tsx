@@ -1,23 +1,32 @@
-import React from 'react';
-import { View, Text } from 'react-native';
+import React, { useRef } from 'react';
+import { View, Text, PanResponder, GestureResponderEvent } from 'react-native';
 import Svg, { Circle, G, Line, Path, Defs, RadialGradient, Stop } from 'react-native-svg';
+import * as Haptics from 'expo-haptics';
 import theme from '../theme';
 
 /**
- * Dial — the static watch face.
+ * Dial — the watch face.
  *
- * A centered mechanical dial drawn in react-native-svg:
+ * Static layers drawn in react-native-svg:
  *  - an outer brass bezel ring,
  *  - 90 minute ticks (every 5th longer + heavier),
  *  - a lume "mainspring" arc showing the set duration out of maxMinutes,
+ *  - a draggable bezel pip at the arc's leading edge,
  *  - the hero minutes number in the display type (no seconds, ever).
  *
- * A1 is static: `minutes` is hardcoded by the caller, no interaction yet.
+ * Interaction (A2): when `interactive`, dragging a finger around the bezel
+ * rotates it. We accumulate *relative* angle change so crossing 12 o'clock
+ * never wraps 90→1, snap to whole minutes, and fire a light haptic on each
+ * minute change to mimic a mechanical crown detent.
  */
 
 type DialProps = {
-  /** Set duration in minutes. */
+  /** Set duration in minutes (controlled). */
   minutes: number;
+  /** Called with the new whole-minute value while dragging. */
+  onChange?: (minutes: number) => void;
+  /** Enable bezel-drag. */
+  interactive?: boolean;
   /** Full-scale of the dial. */
   maxMinutes?: number;
   /** Rendered width/height in px. */
@@ -26,6 +35,9 @@ type DialProps = {
 
 const VB = 300; // SVG viewBox is square; all geometry is in viewBox units
 const C = VB / 2; // center
+const MIN_MINUTES = 1;
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /**
  * Polar → cartesian with 0° at 12 o'clock, increasing clockwise.
@@ -48,9 +60,15 @@ function arcPath(radius: number, startDeg: number, endDeg: number) {
   return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y}`;
 }
 
-export default function Dial({ minutes, maxMinutes = theme.dial.maxMinutes, size = 320 }: DialProps) {
+export default function Dial({
+  minutes,
+  onChange,
+  interactive = false,
+  maxMinutes = theme.dial.maxMinutes,
+  size = 320,
+}: DialProps) {
   const ticks = theme.dial.ticks; // 90, one per minute
-  const fraction = Math.max(0, Math.min(1, minutes / maxMinutes));
+  const fraction = clamp(minutes / maxMinutes, 0, 1);
   const sweep = fraction * 360;
 
   // Radii in viewBox units
@@ -62,8 +80,67 @@ export default function Dial({ minutes, maxMinutes = theme.dial.maxMinutes, size
 
   const numberSize = size * 0.4; // hero figure scales with the dial
 
+  // --- Bezel-drag state (refs so PanResponder handlers never go stale) ---
+  const minutesRef = useRef(minutes);
+  minutesRef.current = minutes;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  const accRef = useRef(minutes); // continuous (float) minutes during a drag
+  const lastAngleRef = useRef(0); // last touch angle, for relative deltas
+  const lastRoundedRef = useRef(minutes);
+
+  // Touch angle: 0° at 12 o'clock, clockwise. locationX/Y are relative to the
+  // gesture view (size × size), so center is (size/2, size/2).
+  const angleFromTouch = (e: GestureResponderEvent) => {
+    const dx = e.nativeEvent.locationX - size / 2;
+    const dy = e.nativeEvent.locationY - size / 2;
+    let a = (Math.atan2(dx, -dy) * 180) / Math.PI;
+    if (a < 0) a += 360;
+    return a;
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => {
+        accRef.current = minutesRef.current; // anchor to the current value
+        lastRoundedRef.current = minutesRef.current;
+        lastAngleRef.current = angleFromTouch(e);
+      },
+      onPanResponderMove: (e) => {
+        const a = angleFromTouch(e);
+        let diff = a - lastAngleRef.current;
+        // shortest signed delta so a drag never "jumps" across the seam
+        if (diff > 180) diff -= 360;
+        else if (diff < -180) diff += 360;
+        lastAngleRef.current = a;
+
+        accRef.current = clamp(
+          accRef.current + (diff / 360) * maxMinutes,
+          MIN_MINUTES,
+          maxMinutes,
+        );
+
+        const rounded = Math.round(accRef.current);
+        if (rounded !== lastRoundedRef.current) {
+          lastRoundedRef.current = rounded;
+          // mechanical crown detent per minute
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          onChangeRef.current?.(rounded);
+        }
+      },
+    }),
+  ).current;
+
+  const pip = pointOnDial(arcR, sweep);
+
   return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+    <View
+      style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}
+      {...(interactive ? panResponder.panHandlers : {})}
+    >
       <Svg width={size} height={size} viewBox={`0 0 ${VB} ${VB}`}>
         <Defs>
           {/* Subtle warm vignette so the face reads as a recessed plate */}
@@ -115,10 +192,17 @@ export default function Dial({ minutes, maxMinutes = theme.dial.maxMinutes, size
             fill="none"
           />
         )}
+
+        {/* Draggable bezel pip at the arc's leading edge */}
+        <Circle cx={pip.x} cy={pip.y} r={9} fill={theme.colors.lume.rest} opacity={0.25} />
+        <Circle cx={pip.x} cy={pip.y} r={5} fill={theme.colors.lume.glow} />
       </Svg>
 
       {/* Hero minutes number — overlaid RN text in the display type, no seconds */}
-      <View style={{ position: 'absolute', alignItems: 'center', justifyContent: 'center' }}>
+      <View
+        pointerEvents="none"
+        style={{ position: 'absolute', alignItems: 'center', justifyContent: 'center' }}
+      >
         <Text
           style={{
             color: theme.colors.text.primary,
