@@ -4,6 +4,7 @@
   "main": "index.ts",
   "dependencies": {
     "expo": "~56.0.12",
+    "expo-dev-client": "~56.0.20",
     "expo-haptics": "^56.0.3",
     "expo-keep-awake": "^56.0.3",
     "expo-status-bar": "~56.0.4",
