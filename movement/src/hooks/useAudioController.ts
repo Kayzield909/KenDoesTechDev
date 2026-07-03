@@ -80,19 +80,15 @@ export function useAudioController(): AudioController {
       volumeFraction.value = 0;
       try {
         await stopPlayback(); // pause whatever was playing
-        if (capturedRef.current != null) {
-          await rampMusicVolume(capturedRef.current, 0); // restore immediately (media is paused)
-        }
       } catch {
         // ignore
       }
-      // Reflect the restored level on the bar.
-      const captured = capturedRef.current;
-      if (captured != null) {
-        volumeFraction.value = withTiming(captured, { duration: RESTORE_MS });
-      }
-      restoredRef.current = true;
-      capturedRef.current = null;
+      // Do NOT raise the volume back now. The user has just fallen asleep and
+      // media must stay silent — bumping the level here (while playback may
+      // resume) is the "loud disturbance at the end". Leave it at zero; the
+      // captured level is restored later via restore() on reset/idle, when the
+      // user is awake and touching the phone. capturedRef is kept for that.
+      restoredRef.current = false;
     };
     run();
   }, [volumeFraction]);
