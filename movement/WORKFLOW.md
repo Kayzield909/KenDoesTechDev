@@ -9,13 +9,19 @@ The native audio module is optional, so the whole app runs in **Expo Go** — on
 the real media-volume fade is simulated (`MEDIA VOLUME · SIM`). Everything else
 (dial, motion, timer, haptics, settings, dimming) is live with ~1s hot-reload.
 
+> The `--go` flag is required: because `expo-dev-client` is installed, a plain
+> `expo start` defaults to dev-client mode and serves an
+> `expo-development-client://` URL that Expo Go can't open (tapping does
+> nothing). `--go` forces the Expo Go URL. (In the terminal you can also press
+> `s` to toggle Expo Go / dev build.)
+
 **One-time:** install "Expo Go" from the Play Store on the Pixel.
 
 **Each session (on the Ryzen box):**
 ```bash
 git pull                 # get Claude's latest changes
 npm install              # only when dependencies changed
-npm run go               # = expo start  (LAN — phone + PC on same network)
+npm run go               # = expo start --go  (Expo Go, LAN)
 ```
 Scan the QR in Expo Go. If the phone can't reach the PC (different network, or
 LAN blocked), use `npm run go:tunnel` instead. Then the loop is:

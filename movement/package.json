@@ -25,8 +25,8 @@
   },
   "scripts": {
     "start": "expo start",
-    "go": "expo start",
-    "go:tunnel": "expo start --tunnel",
+    "go": "expo start --go",
+    "go:tunnel": "expo start --go --tunnel",
     "dev": "expo start --dev-client",
     "dev:tunnel": "expo start --dev-client --tunnel",
     "android": "expo run:android",
