@@ -15,9 +15,10 @@ the real media-volume fade is simulated (`MEDIA VOLUME · SIM`). Everything else
 ```bash
 git pull                 # get Claude's latest changes
 npm install              # only when dependencies changed
-npm run go               # = expo start --tunnel
+npm run go               # = expo start  (LAN — phone + PC on same network)
 ```
-Scan the QR in Expo Go. Then the loop is:
+Scan the QR in Expo Go. If the phone can't reach the PC (different network, or
+LAN blocked), use `npm run go:tunnel` instead. Then the loop is:
 
 ```
 Claude pushes  →  `git pull`  →  Metro hot-reloads on the phone
@@ -32,7 +33,7 @@ change. Requires the Android toolchain set up once (JDK 17 + Android SDK).
 
 ```bash
 npm install
-npm run dev              # = expo start --dev-client --tunnel
+npm run dev              # = expo start --dev-client  (add :tunnel if needed)
 # first time / after native changes, build & install the dev client:
 npm run android          # = expo run:android  (incremental builds are quick)
 ```
