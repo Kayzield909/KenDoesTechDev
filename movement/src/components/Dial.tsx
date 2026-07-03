@@ -51,6 +51,9 @@ const HAND_TAIL_R = 22;
 const BALANCE_CY = C + 62;
 const BALANCE_R = 18;
 
+// Min finger travel (px) before a touch counts as a bezel drag rather than a tap.
+const DRAG_THRESHOLD = 8;
+
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /** Polar → cartesian, 0° at 12 o'clock, clockwise. (Worklet-safe.) */
@@ -105,9 +108,13 @@ export default function Dial({
 
   const panResponder = useRef(
     PanResponder.create({
-      // Claim only on move so center taps/long-presses fall through to the button.
+      // Claim only once the finger has really moved (a drag), and only while
+      // idle — so a thumb tap/long-press (which always jitters a few px) falls
+      // through to the center start/pause button instead of being eaten as a
+      // micro bezel-drag.
       onStartShouldSetPanResponder: () => false,
-      onMoveShouldSetPanResponder: () => minutesRef.current >= 0 && idleRef.current,
+      onMoveShouldSetPanResponder: (_evt, gestureState) =>
+        idleRef.current && Math.hypot(gestureState.dx, gestureState.dy) > DRAG_THRESHOLD,
       onPanResponderGrant: (e) => {
         accRef.current = minutesRef.current;
         lastRoundedRef.current = minutesRef.current;
